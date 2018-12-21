@@ -1,0 +1,433 @@
+#!/bin/bash
+#
+# plotting_sa.sh -- plotting sysstat sa file to pictures.
+#
+# By: Joe Jin <joe.jin@oracle.com>
+#
+# Usage: plotting_sa.sh -i <sa files dir> [-o <output dir>]
+#        If was not gave output directory, it will use current directory to
+#        store output pictures.
+#
+#        Output: $HOSTNAME/$DATE/$DATE_*.png
+#                HOSTNAME & DATE is from sa file.
+#
+# NOTE: before use the script, please install gnuplot.
+# 
+
+# Binary path
+SADF=/usr/bin/sadf
+PLOT=/usr/bin/gnuplot
+TREE=/usr/bin/tree
+
+usage() {
+    echo "Usage: $0 -- Plot sysstat sa data to picture"
+    echo "       $0 -i input_dir -o output_dir [-v]"
+    exit 1
+}
+
+die() {
+    echo "Fatal: $@"
+    if [ -d $tmpdir ]; then
+        rm -rf $tmpdir
+    fi
+    exit 1
+}
+
+warn() {
+    echo "Warning: $@"
+}
+
+verbose=0
+vecho() {
+    if [ $verbose -eq 1 ]; then
+        echo "$@"
+    fi
+}
+
+##############################################################
+## gen_plot_cmd(): generated plot cmd with given cloumns    ##
+##             @1: datafile                                 ##
+##             @2: column list, split by ','.               ##
+##############################################################
+gen_plot_cmd() {
+    local DATAFILE=$1
+    local COLS=$2
+    local PLOT_CMD=""
+
+    if ! [ -f $DATAFILE ]; then
+        warn "datafile $DATAFILE not existed!" && return 1
+    fi
+
+    if [ 'x$COLS' = 'x' ]; then
+        warn "No columns!" && return 1
+    fi
+
+    #####################################
+    # Generate PLOT_CMD                 #
+    #####################################
+    # Replace ',' to ' ' for for-loop
+    NEW_COLS=$(echo $COLS | sed 's/,/ /g')
+    for c in $NEW_COLS; do
+        ind=$c
+        scale="1"
+        # Parse the column with scale($field/$scale)
+        if echo $c | grep '/' &>/dev/null ; then
+             newc=$(echo $c | sed 's/\((\|)\|\$\)//g')
+             ind=$(echo $newc|awk -F'/' '{print $1}')
+             scale=$(echo $newc|awk -F'/' '{print $2}')
+        fi
+        title=$(head -1 $DATAFILE |sed 's/%//g' | awk -v ind=$ind -F';' '{print $ind}')
+        PLOT_CMD="$PLOT_CMD datafile using 3:${c} title '${title}(scale:${scale})' with lines,"
+    done
+
+    PLOT_CMD=$(echo $PLOT_CMD|sed 's/,$//g')
+
+    vecho "$PLOT_CMD"
+    echo "$PLOT_CMD"
+    return 0
+}
+
+##############################################################
+## do_plot_with_cmd(): create statistic picture by input    ##
+##                     file with plot command               ##
+##        @1: Title of output, it be used by output file    ##
+##        @2: Input file                                    ##
+##        @3: Ploting command.                              ##
+##############################################################
+do_plot_with_cmd() {
+    local TITLE=$1
+    local DATAFILE=$2
+    local PLOT_CMD=$3
+
+    vecho "============================"
+    vecho "TITLE: $TITLE"
+    vecho "DATAFILE: $DATAFILE"
+    vecho "PLOT_CMD: $PLOT_CMD"
+
+    local LINES=$(grep -v ^# $DATAFILE | wc -l |awk '{print $1}')
+    if [ $LINES -eq 0 ]; then
+        warn "Empty file!"
+        return 1
+    fi
+    HOSTNAME=$(grep -v ^# $DATAFILE| head -1|awk -F';' '{print $1}')
+    DT=$(grep -v ^# $DATAFILE |  head -1|awk -F';' '{print $3}'|awk '{print $1}')
+    # Create category directory
+    CAT=$outd/$HOSTNAME/${TITLE}
+    mkdir -p $CAT
+    TITLE=${DT}_$TITLE
+    mkdir -p $outd/$HOSTNAME/$DT
+    OUTPUT=$outd/${HOSTNAME}/${DT}/${TITLE}.png
+
+    ######################
+    # Do PLOT by gnuplot #
+    ######################
+    echo "
+set fontpath '/usr/share/fonts/webcore'
+set title \"$TITLE\"
+datafile = \"$DATAFILE\"
+set datafile commentschar \"\"
+set output '$OUTPUT'
+set datafile separator \";\"
+set term png medium size 1920, 600 xFFFFFF truecolor enhanced
+set timefmt \"%Y-%m-%d %H:%M:%S\"
+set xlabel \"Time\"
+set xdata time
+set xtics rotate
+set yrange [] writeback
+set key below
+set grid
+plot $PLOT_CMD" | $PLOT &>/dev/null || rm -f "$OUTPUT"
+
+    test -f ${OUTPUT} && ln $OUTPUT $CAT/
+}
+
+
+##################################################################
+## plot_sa_perdev_with_cols(): plot sa for Per-Device           ##
+##        @1: title of output                                   ##
+##        @2: sar parameter                                     ##
+##        @3: sa file                                           ##
+##        @4: Columns, if want to scale the column, pass it     ##
+##            by format ($index/$scale)                         ##
+##            i.e. "3,4,5" will ploting data in column 3, 4 & 5 ##
+##            4,($5/1000) will plotting data in column 4, and   ##
+##            data in column #5 will scale down 1000.           ##
+##################################################################
+plot_sa_perdev_with_cols() {
+    local TITLE=$1
+    local SAR_PARAM=$2
+    local DATAFILE=$tmpdir/sar_$TITLE.dat
+    local INF=$3
+    local COLS=$4
+
+    if [ "x$TITLE" = "x" ]; then
+        warn "No title!" && return 1
+    fi
+
+    if [ "x$SAR_PARAM" = "x" ]; then
+        die "No sar parameter" && return 1
+    fi
+
+    $SADF -t -d $INF -- $SAR_PARAM | grep -w -v "LINUX-RESTART" > $DATAFILE || (echo "File $INF not a sa format file" && return 1)
+    
+    if [ "$SAR_PARAM"  = "-n DEV" -o "$SAR_PARAM"  = "-n EDEV" -o "$SAR_PARAM" = "-d" ]; then
+    	local ALLDEVS=$(cat $DATAFILE | awk -F';' '{print $4}' | egrep -v -w 'LINUX-RESTART|DEV|IFACE'| sort -u)
+        for dev in $ALLDEVS; do
+            # Create new data file
+            cat $DATAFILE | egrep -w "$dev|DEV|IFACE" > ${DATAFILE}_${dev}
+            local PLOT_CMD=$(gen_plot_cmd "$DATAFILE" "$COLS")
+            if [ $? != 0 ]; then
+                warn "Failed to generate plot_cmd!" && continue
+            fi
+            do_plot_with_cmd "${TITLE}_${dev}" "${DATAFILE}_${dev}" "$PLOT_CMD"
+        done
+    fi
+}
+
+##################################################################
+## plot_sa_with_cols(): plot one sa file for given columns      ##
+##        @1: title of output                                   ##
+##        @2: sar parameter                                     ##
+##        @3: sa file                                           ##
+##        @4: Columns, if want to scale the column, pass it     ##
+##            by format ($index/$scale)                         ##
+##            i.e. "3,4,5" will ploting data in column 3, 4 & 5 ##
+##            4,($5/1000) will plotting data in column 4, and   ##
+##            data in column #5 will scale down 1000.           ##
+## NOTE: Some sar output is per-device(IO or Network), it will  ##
+##       create per-device statistic picture.                   ##
+##################################################################
+plot_sa_with_cols() {
+    local TITLE=$1
+    local SAR_PARAM=$2
+    local DATAFILE=$tmpdir/sar_$TITLE.dat
+    local INF=$3
+    local COLS=$4
+
+    if [ "x$TITLE" = "x" ]; then
+        warn "No title!" && return 1
+    fi
+
+    if [ "x$COLS" = "x" ]; then
+        warn "No columns list!" && return 1
+    fi
+
+    if [ "x$SAR_PARAM" = "x" ]; then
+        die "No sar parameter" && return 1
+    fi
+
+    $SADF -t -d $INF -- $SAR_PARAM | grep -w -v "LINUX-RESTART" > $DATAFILE || (echo "File $INF not a sa format file" && return 1)
+    
+    local PLOT_CMD=$(gen_plot_cmd "$DATAFILE" "$COLS")
+    if [ $? != 0 ]; then
+        warn "Failed to generate plot_cmd!" && return 1
+    fi
+
+    do_plot_with_cmd $TITLE $DATAFILE "$PLOT_CMD"
+}
+
+##################################################################
+## plot_sa_one(): Plot one sa file                              ##
+##            @1: sa file                                       ##
+##################################################################
+plot_sa_one() {
+    local INF=$1
+
+    if [ ! -f $1 ]; then
+        warn "$INF: not existed!" && return 1
+    fi
+
+    # Processes List size & RunQ size
+    plot_sa_with_cols "CPU_ProcessesList_And_RunQ" "-q" $INF '4,($5/1000)'
+    # Loadavg
+    plot_sa_with_cols "CPU_LoadAvg" "-q" $INF 6,7,8
+    # Cpu Utilization
+    plot_sa_with_cols "CPU_Util" "-u" $INF '5,6,7,8,9,10'
+    # Task Creation and Switch
+    plot_sa_with_cols "CPU_Task_Creation_Switch" "-w" $INF '4,($5/1000)'
+
+    # Memory Utilization
+    plot_sa_with_cols "MM_Mem_Util" "-r" $INF '($4/1024),($5/1024),($7/1000),($8/1000),($9/1000)'
+    # Memory used and commit %
+    plot_sa_with_cols "MM_Mem_Used_Commit_Percentage" "-r" $INF '6,10'
+    # Memory Stat
+    plot_sa_with_cols "MM_Mem_Stat" "-R" $INF '4,5,6'
+    # vmstat
+    plot_sa_with_cols "MM_vmstat" "-B" $INF '4,5,11'
+    # vmstat, page fault, page free.
+    plot_sa_with_cols "MM_vmstat_PGfault" "-B" $INF '6,8'
+    # vmstat, majflt, 
+    plot_sa_with_cols "MM_vmstat_Majflt" "-B" $INF '7'
+    # vmstat, pgscand
+    plot_sa_with_cols "MM_vmstat_PGscan" "-B" $INF '9,10'
+    # vmstat, %vmeff
+    plot_sa_with_cols "MM_vmstat_VMeff" "-B" $INF '11'
+    # Swap Utilization
+    plot_sa_with_cols "MM_Swap_Util_Percentage" "-S" $INF '6,8'
+    # Swap IO
+    plot_sa_with_cols "MM_Swap_IO" "-W" $INF '4,5'
+
+    # IO transfer stat
+    plot_sa_with_cols "IO_Xfer_Stat" "-b" $INF '($4/100),($5/100),($6/100),($7/1000),($8/1000)'
+    # IO Stat
+    plot_sa_perdev_with_cols "IO_STAT" "-d" $INF '5,6,7,8,9,10,11,12'
+
+    # IP
+    plot_sa_perdev_with_cols "NET_STAT" "-n DEV" $INF '5,6,7,8,9,10,11'
+    # IP Error
+    plot_sa_perdev_with_cols "NETSTAT_Error" "-n EDEV" $INF '($4/1000),5,($6/1000),($7/1000),($8/1000),($9/1000)'
+    # NFS
+    plot_sa_with_cols "NET_NFS_STAT" "-n NFS" $INF '4,5,6,7,8,9'
+    # NFS Call
+    plot_sa_with_cols "NET_NFSD_STAT" "-n NFSD" $INF '4,5,6,7,8,9,10,11,12,13,14'
+    # Socket
+    plot_sa_with_cols "NET_SOCK_STAT" "-n SOCK" $INF '4,5,6,7,8,9'
+
+    # Inode/Files
+    plot_sa_with_cols "inode_file" "-v" $INF '($4/1000),($5/100),($6/1000),7'
+    # TTY
+    plot_sa_with_cols "TTY" "-y" $INF '4,5,6,7,8,9,10'
+}
+
+##################################################################
+## create_subdir_index -- Put all picture in dir to index.html  ##
+## NOTE: before call it please make sure already on target dir  ##
+##################################################################
+create_subdir_index() {
+    # Header
+    echo "<HTML>
+    <!DOCTYPE html>
+       <head>
+          <title>SA Data</title>
+       </head>
+       <body>" > index.html
+    
+    # png files
+    for f in *.png; do
+          if ! [ -f $f ] ; then
+              break;
+          fi
+          echo "      <LI>$f</LI>" >> index.html
+          echo "      <img width=100% src=\"$f\"><br>" >> index.html
+    done
+    
+    # Footer
+    echo "   </body>
+    </HTML>" >> index.html
+}
+
+##################################################################
+## create_html: generate html which can view plotting picture   ##
+##              from browser.                                   ##
+##          $1: hostname                                        ##
+##################################################################
+create_html()
+{
+
+    HOST=$1
+    CURDIR=$(pwd)
+
+    if ! [ -d $outd/$HOST ]; then
+        warn "Failed to gerenate html file!"
+        return 1
+    fi
+
+    cd $outd || die "Unable to access $outd"
+
+    # Create root index.html
+    cat <<EOF > index.html
+<!DOCTYPE html>
+<html>
+   <head>
+      <title>SA Data</title>
+   </head>
+   
+   <frameset cols = "10%,90%">
+      <frame name = "left" src = "dir.html" />
+      <frame name = "right" src = "main.html" />
+      <noframes>
+         <body>Your browser does not support frames.</body>
+      </noframes>
+   </frameset>
+   
+</html>
+EOF
+    
+    # Create main.html
+    cat <<EOF > main.html
+<!DOCTYPE html>
+<html>
+   <head>
+      <title>Main Frame</title>
+   </head>
+</html>
+EOF
+    
+    # Create dir.html
+    $TREE -H "${HOST}" -L 1 -T "${HOST}" --noreport --charset utf-8 ${HOST} > dir_tmp.html
+
+    # Set the target to right frame.
+    sed 's/<br>/& \n/g' dir_tmp.html | sed 's/href=.*"/& target=right/g' | \
+        grep -v "${HOST}/index.html" > dir.html
+
+    rm -f dir_tmp.html
+    
+    cd ${HOST} || die "Unable to access $outd/$HOST"
+    for i in */; do
+       pushd $i &>/dev/null
+       create_subdir_index
+       popd &>/dev/null
+    done
+    touch index.html
+    cd $CURDIR
+}
+
+if ! [ -x $SADF ] || ! [ -x $PLOT ] || ! [ -x $TREE ] ; then
+    die "No sadf or gnuplot installed"
+fi
+
+while getopts ":i:o:v" o; do
+    case "${o}" in
+        i)
+            ind=${OPTARG}
+            ;;
+        o)
+            outd=${OPTARG}
+            ;;
+        v)
+            verbose=1
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+
+if  [ "x$ind" = "x" ] || ! [ -d $ind ]; then
+    echo "Error: Invalid input directory!"
+    usage
+fi
+
+if [ "x$outd" = "x" ]; then
+    outd=$(pwd)
+else
+    mkdir -p $outd
+fi
+
+tmpdir=$(mktemp -d /tmp/SAR_DATA.XXXXXXXX)
+
+if ! [ -d $tmpdir ]; then
+    die "Failed to create temp dir"
+fi
+
+## Plotting all sa file from here ##
+for i in $ind/sa[0-9]*; do
+    echo "Plotting $i..."
+    plot_sa_one $i
+done
+
+rm -rf $tmpdir
+
+create_html $HOSTNAME
+
+exit 0
