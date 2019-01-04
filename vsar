@@ -1,17 +1,28 @@
 #!/bin/bash
 #
-# plotting_sa.sh -- plotting sysstat sa file to pictures.
+# Copyright 2018-2019 Joe Jin <joe.jin@oracle.com>
 #
-# By: Joe Jin <joe.jin@oracle.com>
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
 #
-# Usage: plotting_sa.sh -i <sa files dir> [-o <output dir>]
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#    General Public License <gnu.org/licenses/gpl.html> for more details.
+#
+# vsar -- plotting sysstat sa file to pictures.
+#
+#
+# Usage: vsar -i <Dir_Of_Sar> [-o <output dir>]
 #        If was not gave output directory, it will use current directory to
 #        store output pictures.
 #
 #        Output: $HOSTNAME/$DATE/$DATE_*.png
 #                HOSTNAME & DATE is from sa file.
 #
-# NOTE: before use the script, please install gnuplot.
+# NOTE: before use the script, please install gnuplot and tree.
 # 
 
 # Binary path
